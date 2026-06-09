@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Notes</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <h1>Notes</h1>
+  <input id="search-input" type="search" placeholder="Zoeken in titels en inhoud…" autocomplete="off">
+  <button id="new-note-btn">+ Nieuwe note</button>
+</header>
+
+<main>
+  <div id="status-bar"></div>
+  <div id="notes-grid"></div>
+</main>
+
+<!-- New note modal -->
+<div class="modal-overlay" id="new-note-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Nieuwe note</h2>
+      <button class="modal-close" id="modal-close-btn">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div>
+        <label for="note-title">Titel (bestandsnaam zonder .html)</label>
+        <input type="text" id="note-title" placeholder="bijv. Kubernetes_cheatsheet" autocomplete="off">
+      </div>
+      <div>
+        <label for="note-content">Inhoud (HTML)</label>
+        <textarea id="note-content" placeholder="<h2>Titel</h2>&#10;<p>Jouw note hier…</p>"></textarea>
+      </div>
+      <div class="error-msg" id="note-error"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" id="modal-cancel-btn">Annuleren</button>
+      <button class="btn btn-primary" id="save-note-btn">Opslaan</button>
+    </div>
+  </div>
+</div>
+
+<!-- Note viewer (full-page iframe) -->
+<div id="note-viewer">
+  <div id="viewer-bar">
+    <button id="viewer-back">← Terug</button>
+    <span id="viewer-title"></span>
+    <button id="viewer-edit-btn" class="btn btn-secondary">Bewerken</button>
+    <a id="viewer-open-link" href="#" target="_blank">Open in nieuw tabblad ↗</a>
+  </div>
+  <iframe id="viewer-frame" sandbox="allow-same-origin allow-scripts"></iframe>
+</div>
+
+<script>
+const grid = document.getElementById('notes-grid');
+const statusBar = document.getElementById('status-bar');
+const searchInput = document.getElementById('search-input');
+const newNoteBtn = document.getElementById('new-note-btn');
+const modal = document.getElementById('new-note-modal');
+const modalCloseBtn = document.getElementById('modal-close-btn');
+const modalCancelBtn = document.getElementById('modal-cancel-btn');
+const saveNoteBtn = document.getElementById('save-note-btn');
+const noteTitle = document.getElementById('note-title');
+const noteContent = document.getElementById('note-content');
+const noteError = document.getElementById('note-error');
+const viewer = document.getElementById('note-viewer');
+const viewerBack = document.getElementById('viewer-back');
+const viewerTitle = document.getElementById('viewer-title');
+const viewerFrame = document.getElementById('viewer-frame');
+const viewerOpenLink = document.getElementById('viewer-open-link');
+
+let allNotes = [];
+let searchTimeout = null;
+let editingNote = null; // filename being edited, or null for new
+
+function displayName(filename) {
+  return filename.replace(/\.html$/i, '').replace(/_/g, ' ');
+}
+
+function renderCards(notes, badgeText = '') {
+  grid.innerHTML = '';
+  if (!notes.length) {
+    grid.innerHTML = '<p class="no-results">Geen notes gevonden.</p>';
+    return;
+  }
+  for (const item of notes) {
+    const name = typeof item === 'string' ? item : item.name;
+    const badge = badgeText || (typeof item === 'object' && item.matchType === 'content' ? 'overeenkomst in inhoud' : '');
+    const card = document.createElement('div');
+    card.className = 'note-card';
+    card.innerHTML = `
+      <div class="note-title">${displayName(name)}</div>
+      ${badge ? `<div class="note-badge">${badge}</div>` : ''}
+    `;
+    card.addEventListener('click', () => openNote(name));
+    grid.appendChild(card);
+  }
+}
+
+async function loadNotes() {
+  statusBar.textContent = 'Laden…';
+  const res = await fetch('/api/notes');
+  allNotes = await res.json();
+  statusBar.textContent = `${allNotes.length} notes`;
+  renderCards(allNotes);
+}
+
+async function openNote(name) {
+  viewerTitle.textContent = displayName(name);
+  viewerFrame.src = `/notes/${encodeURIComponent(name)}`;
+  viewerOpenLink.href = `/notes/${encodeURIComponent(name)}`;
+  viewerFrame.dataset.note = name;
+  viewer.classList.add('open');
+}
+
+viewerBack.addEventListener('click', () => {
+  viewer.classList.remove('open');
+  viewerFrame.src = '';
+});
+
+document.getElementById('viewer-edit-btn').addEventListener('click', async () => {
+  const name = viewerFrame.dataset.note;
+  if (!name) return;
+  const res = await fetch(`/api/notes/${encodeURIComponent(name)}`);
+  const content = await res.text();
+  editingNote = name;
+  noteTitle.value = displayName(name);
+  noteTitle.disabled = true;
+  noteContent.value = content;
+  noteError.textContent = '';
+  document.querySelector('#new-note-modal .modal-header h2').textContent = 'Note bewerken';
+  saveNoteBtn.textContent = 'Opslaan';
+  modal.classList.add('open');
+  noteContent.focus();
+});
+
+// Search
+searchInput.addEventListener('input', () => {
+  clearTimeout(searchTimeout);
+  const q = searchInput.value.trim();
+  if (!q) {
+    statusBar.textContent = `${allNotes.length} notes`;
+    renderCards(allNotes);
+    return;
+  }
+  searchTimeout = setTimeout(async () => {
+    statusBar.textContent = 'Zoeken…';
+    const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+    const results = await res.json();
+    statusBar.textContent = `${results.length} resultaten voor "${q}"`;
+    renderCards(results);
+  }, 300);
+});
+
+// New note modal
+function openModal() {
+  editingNote = null;
+  noteTitle.value = '';
+  noteTitle.disabled = false;
+  noteContent.value = defaultTemplate();
+  noteError.textContent = '';
+  document.querySelector('#new-note-modal .modal-header h2').textContent = 'Nieuwe note';
+  saveNoteBtn.textContent = 'Opslaan';
+  modal.classList.add('open');
+  noteTitle.focus();
+}
+function closeModal() {
+  modal.classList.remove('open');
+  noteTitle.disabled = false;
+}
+
+function defaultTemplate() {
+  return `<html>\n<head>\n  <meta charset="UTF-8">\n  <link rel="stylesheet" href="style.css">\n</head>\n<body>\n<h2>Titel</h2>\n<p>Inhoud hier…</p>\n</body>\n</html>`;
+}
+
+newNoteBtn.addEventListener('click', openModal);
+modalCloseBtn.addEventListener('click', closeModal);
+modalCancelBtn.addEventListener('click', closeModal);
+modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
+
+saveNoteBtn.addEventListener('click', async () => {
+  noteError.textContent = '';
+  const name = noteTitle.value.trim();
+  const content = noteContent.value.trim();
+  if (!name) { noteError.textContent = 'Geef een titel op.'; return; }
+  if (!content) { noteError.textContent = 'Inhoud is verplicht.'; return; }
+
+  saveNoteBtn.disabled = true;
+  saveNoteBtn.textContent = 'Opslaan…';
+
+  let res;
+  if (editingNote) {
+    res = await fetch(`/api/notes/${encodeURIComponent(editingNote)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content })
+    });
+  } else {
+    res = await fetch('/api/notes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, content })
+    });
+  }
+
+  saveNoteBtn.disabled = false;
+  saveNoteBtn.textContent = 'Opslaan';
+
+  if (res.ok) {
+    const { name: savedName } = await res.json();
+    closeModal();
+    await loadNotes();
+    openNote(savedName);
+  } else {
+    const { error } = await res.json();
+    noteError.textContent = error || 'Opslaan mislukt.';
+  }
+});
+
+// Keyboard shortcuts
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    if (viewer.classList.contains('open')) {
+      viewer.classList.remove('open');
+      viewerFrame.src = '';
+    } else {
+      closeModal();
+    }
+  }
+  if ((e.ctrlKey || e.metaKey) && e.key === 'f' && !modal.classList.contains('open')) {
+    e.preventDefault();
+    searchInput.focus();
+  }
+});
+
+loadNotes();
+</script>
+</body>
+</html>
